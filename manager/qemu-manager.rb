@@ -1,4 +1,4 @@
-#!/usr/bin/ruby
+#!/usr/bin/env ruby
 require 'gtk2'
 require 'yaml'
 require 'fileutils'
@@ -26,13 +26,14 @@ Manage a dir of qemu images, launch them with specified command
   Rename
 
 =end
-DEFAULT_SCRIPT = 'qemu-all.sh hd %f'
-DEFAULT_GLADE = File.join(ENV['HOME'], 'ruby/qemu-manager.xml')
 
 module Qemu
-  BASE = File.join(ENV['HOME'], 'qemu')
+  BASE_DIR = File.join( ENV['HOME'], 'qemu' )
+  DEFAULT_GLADE = File.join( BASE_DIR, 'manager', 'qemu-manager.xml' )
+  COMMENTS_FILE = File.join( BASE_DIR, 'manager', 'comments.yaml' )
+  DEFAULT_SCRIPT = 'qemu-all.sh hd %f'
 
-  class Image
+  class VMImage
     def initialize(path)
       @path = path
       @name = File.basename(@path)
@@ -41,7 +42,8 @@ module Qemu
     attr_reader :path, :name, :format, :size, :disk_size, :backing_file
 
     def get_info
-      `qemu-img info #{@path}`.each {|l| 
+      STDERR.puts("=== get_info #{@path}") if $DEBUG
+      `qemu-img info #{@path}`.lines.each {|l| 
         l.chomp!
         case l
         when /^file format: /
@@ -58,7 +60,7 @@ module Qemu
   end
 
   class DirectoryStore
-    def initialize(dir=BASE)
+    def initialize(dir=BASE_DIR)
       @dir = dir
       @images = {}
       read_dirs
@@ -69,8 +71,8 @@ module Qemu
       return unless File.directory?(@dir)
       Dir.open(@dir).each {|f|
         next unless f.match(/\.qcow$/)
-        path = File.join(BASE, f)
-        @images[path] = Image.new(path)
+        path = File.join(@dir, f)
+        @images[path] = VMImage.new(path)
       }
     end
   end
@@ -144,7 +146,7 @@ EOF
       cmd = "qemu-img #{@glade['entry2'].text.to_s}"
       log 'gui', cmd
       system cmd
-      refresh_treeview(@gclient[GCONF_DIR_KEY])
+      refresh_treeview
     end
 
     def delete_image
@@ -159,7 +161,7 @@ EOF
         if response == Gtk::Dialog::RESPONSE_OK
           File.unlink @current.path
           @image_data.delete(@current.path)
-          refresh_treeview(@gclient[GCONF_DIR_KEY])
+          refresh_treeview
         end
         dialog.destroy
       end
@@ -186,7 +188,7 @@ EOF
         if @image_data.cmdlines[iter[PATH]]
           @glade['entry1'].text = @image_data.cmdlines[iter[PATH]]
         else
-          @glade['entry1'].text = @gclient[GCONF_SCRIPT_KEY]
+          @glade['entry1'].text = Qemu::DEFAULT_SCRIPT
         end
         @glade['label3'].text = iter[NAME]
         @glade['label10'].text = ''
@@ -243,10 +245,10 @@ EOF
       @glade['dialog_preferences'].show
     end
     def on_entry3_changed
-      @gclient[GCONF_DIR_KEY] = @glade['entry3'].text
+      # TODO update configuration store with @glade['entry3'].text
     end
     def on_entry4_changed
-      @gclient[GCONF_SCRIPT_KEY] = @glade['entry4'].text
+      # TODO update configuration store with @glade['entry4'].text
     end
     def on_button6_clicked
       @glade['dialog_preferences'].hide
@@ -268,10 +270,6 @@ EOF
   end
 
   PROG_NAME = 'Qemu Manager'
-  GCONF_PATH = '/apps/qemu-manager'
-  GCONF_DIR_KEY = '/apps/qemu-manager/qemu_store_directory'
-  GCONF_SCRIPT_KEY = '/apps/qemu-manager/qemu_script_cmdline'
-  GCONF_COMMENTS_KEY = '/apps/qemu-manager/comments'
   ( PATH,
     NAME,
     FORMAT,
@@ -279,7 +277,7 @@ EOF
     DISK_SIZE,
     BACKING) = *(0..5).to_a
 
-  class ImageData
+  class VMImageData
     def initialize
       @comments = Hash.new
       @cmdlines = Hash.new
@@ -314,53 +312,36 @@ EOF
       @statusbar = @glade['statusbar1']
       #@last = nil;
 
-      @image_data = ImageData.new
+      @image_data = VMImageData.new
       @glade['textview1'].buffer.signal_connect("end-user-action") do 
         puts "=== changed buffer saved" if $DEBUG
         @image_data.comments[@current.path] = @glade['textview1'].buffer.text
       end
 
-      init_gconf
+      init_conf
       init_treeview
-
-      # inotify
-      #@iclient = Inotify.new
-			#@iclient.add_watch(@gclient[GCONF_DIR_KEY], Inotify::CREATE | Inotify::DELETE | Inotify::MOVE)
     end
     attr :glade
 
     def run
-      refresh_treeview(@gclient[GCONF_DIR_KEY])
+      refresh_treeview
     end
 
-    def init_gconf
-      @gclient = GConf::Client.default
-      @gclient.add_dir(GCONF_PATH)
+    def init_conf
+      # preferences window, defaults
+      @glade['entry3'].text = Qemu::BASE_DIR
+      @glade['entry4'].text = Qemu::DEFAULT_SCRIPT
 
-      # default values
-      @gclient[GCONF_SCRIPT_KEY] ||= DEFAULT_SCRIPT
-      @gclient[GCONF_DIR_KEY] ||= Qemu::BASE
+      # TODO no more gconf
+      @glade['entry3'].editable = false
+      @glade['entry4'].editable = false
 
-      # preferences window
-      @glade['entry3'].text = @gclient[GCONF_DIR_KEY] 
-      @glade['entry4'].text = @gclient[GCONF_SCRIPT_KEY]
 
       # FIXME ruby doesn't support set_list
-      if @gclient[GCONF_COMMENTS_KEY] 
-          @image_data = YAML::load(@gclient[GCONF_COMMENTS_KEY])
+      if File.readable?( Qemu::COMMENTS_FILE )
+          @image_data = YAML::load( Qemu::COMMENTS_FILE )
       end
-      @image_data = ImageData.new if not @image_data.kind_of?(ImageData)
-
-      # refresh view if gconf changes
-      @gclient.notify_add(GCONF_DIR_KEY) { |client,entry|
-        if File.directory?(entry.value)
-          @glade['entry3'].text = entry.value
-          refresh_treeview(entry.value)
-        end
-      }
-      @gclient.notify_add(GCONF_SCRIPT_KEY) { |client,entry|
-        @glade['entry4'].text = entry.value
-      }
+      @image_data = VMImageData.new if not @image_data.kind_of?(VMImageData)
     end
 
     def on_treeview_cell_edited(cell, path_string, new_text, column)
@@ -423,12 +404,12 @@ EOF
       end
     end
   
-    def refresh_treeview(dir)
+    def refresh_treeview(dir=Qemu::BASE_DIR)
 
       # FIXME statusbar update only once?
       if File.directory?(dir)
         Dir::chdir dir 
-        log 'load', 'loading store... '
+        log 'load', "loading store (#{dir})... "
       else
         log 'load', 'please set up your qemu image directory in the preferences'
         return
@@ -494,7 +475,7 @@ EOF
       delete_image
     end
     def on_toolbutton_refresh_clicked(widget)
-      refresh_treeview(@gclient[GCONF_DIR_KEY])
+      refresh_treeview
     end
 
     def on_window1_destroy_event
@@ -505,7 +486,9 @@ EOF
     end
 
     def quit
-      @gclient[GCONF_COMMENTS_KEY] = @image_data.to_yaml
+      File.open( Qemu::COMMENTS_FILE, 'w' ) { |f|
+        f.write @image_data.to_yaml
+      }
       Gtk.main_quit
     end
   end
@@ -516,7 +499,7 @@ end
   Here be dragons
 
 =end
-glade_file = DEFAULT_GLADE
+glade_file = Qemu::DEFAULT_GLADE
 if (File.readable? 'qemu-manager.glade')
   glade_file = 'qemu-manager.glade'
 end
