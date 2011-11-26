@@ -1,7 +1,5 @@
 #!/usr/bin/ruby
 require 'gtk2'
-require 'libglade2'
-require 'gconf2'
 require 'yaml'
 require 'fileutils'
 #require 'inotify'
@@ -22,13 +20,14 @@ Manage a dir of qemu images, launch them with specified command
 
 == TODO
 
+  FIX path management, use a data dir
   Startup and Notify
   Confirmation dialog
   Rename
 
 =end
 DEFAULT_SCRIPT = 'qemu-all.sh hd %f'
-DEFAULT_GLADE = File.join(ENV['HOME'], 'ruby/qemu-manager.glade')
+DEFAULT_GLADE = File.join(ENV['HOME'], 'ruby/qemu-manager.xml')
 
 module Qemu
   BASE = File.join(ENV['HOME'], 'qemu')
@@ -100,8 +99,8 @@ module QemuManager
 <b>Size:</b>
 #{found[DISK_SIZE]} / #{found[SIZE]}
 EOF
-        descr += "\n<b>Base file</b>\n#{found.parent[NAME]}\n" if found.parent
-        descr += "\n<b>Command Line</b>\n#{@image_data.cmdlines[path]}" if @image_data.cmdlines[path]
+        descr += "\n<b>Base file:</b>\n#{found.parent[NAME]}\n" if found.parent
+        descr += "\n<b>Command Line:</b>\n#{@image_data.cmdlines[path]}" if @image_data.cmdlines[path]
         @glade['label1'].markup =  descr
 
         @glade['textview1'].buffer.text = ''
@@ -308,7 +307,9 @@ EOF
 
     def initialize(glade_file)
       #bindtextdomain(PROG_NAME, nil, nil, "UTF-8")
-      @glade = GladeXML.new(glade_file, nil, PROG_NAME, nil, GladeXML::FILE) {|handler| method(handler)}
+      @glade = Gtk::Builder.new
+      @glade.add_from_file( glade_file )
+      @glade.connect_signals { |handler| method(handler) }
 
       @statusbar = @glade['statusbar1']
       #@last = nil;
@@ -438,27 +439,29 @@ EOF
 
       model = Gtk::TreeStore.new(String, String, String, String, String, Object)
       @treeview.set_model(model)
+
+      # add images without backing file
       @qemu_store.images.select { |p,i| i.backing_file.nil? }.sort.each { |p,i| 
         iter = model.append(nil)
         set_iter(iter, p, i)
         iter[BACKING] = false
       }
+
+      # add images with backing files
       @qemu_store.images.select { |p,i| i.backing_file }.each { |p,i|
         # find parent
         parent = nil
         @treeview.model.each {|model, path, iter|
-          if iter[PATH] == i.backing_file
+          if File.identical?(iter[PATH], i.backing_file)
               parent = iter
               iter[BACKING] = true
               break
           end
         }
-        # add child
-        if parent
-          iter = model.append(parent)
-          set_iter(iter, p, i)
-          iter[BACKING] = false
-        end
+        # add child to parent - works if parent=nil
+        iter = model.append(parent)
+        set_iter(iter, p, i)
+        iter[BACKING] = false
       }
       @treeview.columns_autosize
       @treeview.expand_all
